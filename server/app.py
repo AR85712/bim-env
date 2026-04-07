@@ -39,15 +39,6 @@ app = create_app(
 )
 
 
-def main() -> None:
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-
-
-if __name__ == "__main__":
-    main()
-
-
 def main(host: str = "0.0.0.0", port: int = 8000) -> None:
     """Entry point for ``uv run server`` and ``python -m bim_env.server.app``."""
     import uvicorn
