@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openenv-bim-env"
+version = "0.1.0"
+description = "BIM Clash/Conflict Resolution RL environment for OpenEnv"
+requires-python = ">=3.10"
+dependencies = [
+    "openenv-core[core]>=0.2.2",
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
+]
+rl = [
+    "gymnasium>=0.29.0",
+    "stable-baselines3[extra]>=2.3.0",
+]
+
+[project.scripts]
+server = "bim_env.server.app:main"
+
+[tool.setuptools]
+include-package-data = true
+packages = ["bim_env", "bim_env.server"]
+package-dir = { "bim_env" = ".", "bim_env.server" = "server" }
