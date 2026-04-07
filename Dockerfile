@@ -37,13 +37,7 @@ COPY --from=builder /app/env/README.md /app/README.md
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONPATH="/app:$PYTHONPATH"
 ENV ENABLE_WEB_INTERFACE=true
-# PORT defaults to 8000 so openenv's from_docker_image() (which maps :8000) works.
-# HuggingFace Spaces override this to 7860 via the Space runtime.
-ENV PORT=8000
 
-EXPOSE 8000 7860
+EXPOSE 7860
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
-    CMD curl -f http://localhost:${PORT}/health || exit 1
-
-CMD uvicorn env.server.app:app --host 0.0.0.0 --port ${PORT}
+CMD ["uvicorn", "env.server.app:app", "--host", "0.0.0.0", "--port", "7860"]
