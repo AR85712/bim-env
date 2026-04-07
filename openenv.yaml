@@ -3,4 +3,4 @@ name: bim_env
 type: space
 runtime: fastapi
 app: server.app:app
-port: 7860
+port: 8000

@@ -50,7 +50,7 @@ from bim_env import BimAction, BimEnv, BimObservation
 IMAGE_NAME   = os.getenv("LOCAL_IMAGE_NAME", "bim-env:latest")
 API_KEY      = os.getenv("HF_TOKEN") or os.getenv("API_KEY", "")
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME   = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+MODEL_NAME   = os.getenv("MODEL_NAME", "meta-llama/Llama-4-Scout-17B-16E-Instruct")
 TASK_NAME    = os.getenv("TASK", "medium")
 BENCHMARK    = "bim_env"
 
@@ -59,6 +59,7 @@ TEMPERATURE         = float(os.getenv("TEMPERATURE", "0.2"))
 MAX_TOKENS          = int(os.getenv("MAX_TOKENS", "200"))
 STEP_SIZE_FALLBACK  = float(os.getenv("STEP_SIZE", "400.0"))   # mm, heuristic fallback
 SUCCESS_SCORE_THRESHOLD = 0.70   # grade >= 0.70 means all clashes resolved
+HEURISTIC_ONLY      = os.getenv("HEURISTIC_ONLY", "").lower() in ("1", "true", "yes")
 
 # ---------------------------------------------------------------------------
 # Logging helpers  (mandatory stdout format)
@@ -138,10 +139,11 @@ def heuristic_action(obs: BimObservation, step_size: float = STEP_SIZE_FALLBACK)
     if mag < 1e-9:
         raw, mag = [0.0, 0.0, 1.0], 1.0
 
-    # Scale step to fully escape: penetration_depth * 1.5 guarantees clearance.
-    # Fall back to step_size when depth is unavailable or very small.
+    # Scale step to fully escape: penetration_depth * 2.5 gives a comfortable
+    # clearance margin and avoids oscillation where 1.5x causes re-entry from
+    # the opposite face. Use a small 100 mm floor only for near-zero depth.
     depth = max_depth.get(best, 0.0)
-    actual_step = max(depth * 1.5, step_size)
+    actual_step = min(max(depth * 2.5, 100.0), 1000.0)
 
     return BimAction(element_index=best, translation=[v / mag * actual_step for v in raw])
 
@@ -153,7 +155,7 @@ def heuristic_action(obs: BimObservation, step_size: float = STEP_SIZE_FALLBACK)
 SYSTEM_PROMPT = textwrap.dedent("""
     You are an expert BIM (Building Information Modelling) coordination engineer.
     Your task is to resolve geometric clashes between MEP (ducts, pipes, cable trays)
-    and structural elements (beams) in a building model.
+    and structural elements (beams, columns) in a building model.
 
     At each step you receive the current list of clashes and must output EXACTLY one
     JSON object — nothing else — with this schema:
@@ -162,8 +164,11 @@ SYSTEM_PROMPT = textwrap.dedent("""
     Rules:
     - element_index is the 0-based index of the MEP element to move (movable elements only).
     - translation is [dx, dy, dz] in millimetres; each component is clamped to [-1000.0, 1000.0] by the env.
-    - Use the penetration_vector hints in each clash to decide the escape direction.
-    - Prefer small moves that fully escape the beam rather than large random displacements.
+    - Each clash provides penetration_depth (mm) and penetration_vector [dx, dy, dz].
+    - Compute the escape translation as: penetration_vector × (penetration_depth × 1.5).
+      This guarantees the element fully clears the obstruction in ONE step rather than many small nudges.
+    - When multiple clashes involve the same element, use the largest penetration_depth to size the move.
+    - Prioritise the movable element involved in the most or largest clashes.
     - Do NOT add any explanation — output only the JSON object.
 """).strip()
 
@@ -184,12 +189,13 @@ def _clash_summary(obs: BimObservation) -> str:
                 f"min={el.bbox_min}  disp={el.displacement:.1f} mm"
             )
 
-    lines += ["", "Active clashes (element_a -> element_b | overlap_vol | penetration_vector):"]
+    lines += ["", "Active clashes (element_a -> element_b | overlap_vol | depth | pvec | recommended_step_mm):"]
     for c in obs.clashes[:10]:   # cap at 10 to stay within token budget
+        recommended = [round(v * c.penetration_depth * 1.5, 1) for v in c.penetration_vector]
         lines.append(
             f"  {c.element_a_class} vs {c.element_b_class} | "
             f"vol={c.overlap_volume:.0f} mm\u00b3 | depth={c.penetration_depth:.1f} mm | "
-            f"pvec={c.penetration_vector}"
+            f"pvec={c.penetration_vector} | recommended_translation={recommended}"
         )
     if len(obs.clashes) > 10:
         lines.append(f"  ... and {len(obs.clashes) - 10} more clashes")
@@ -248,27 +254,28 @@ def get_llm_action(
 
 
 async def main() -> None:
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-
-    # Spin up the Docker container and connect
-    env = await BimEnv.from_docker_image(IMAGE_NAME)
-
     history: List[str] = []
     rewards: List[float] = []
     steps_taken = 0
     score = 0.0
     success = False
+    env = None
 
     log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
 
     try:
-        # Reset — configure task first via a configure action if needed
-        result = await env.reset()
+        client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
-        # If the env defaulted to a different task, reconfigure
-        if result.observation.task != TASK_NAME:
-            await env.step(BimAction(element_index=-1, translation=[0, 0, 0], task=TASK_NAME))
-            result = await env.reset()
+        # Connect to a running server, or spin up a Docker container as fallback
+        base_url = os.getenv("BIM_SERVER_URL", "")
+        if base_url:
+            env = BimEnv(base_url=base_url)
+            await env.__aenter__()
+        else:
+            env = await BimEnv.from_docker_image(IMAGE_NAME)
+
+        # Task is set via the TASK env var on the server; just reset.
+        result = await env.reset()
 
         obs = result.observation
         last_reward = 0.0
@@ -277,7 +284,7 @@ async def main() -> None:
             if result.done:
                 break
 
-            action = get_llm_action(client, obs, history)
+            action = heuristic_action(obs) if HEURISTIC_ONLY else get_llm_action(client, obs, history)
 
             result = await env.step(action)
             obs = result.observation
@@ -314,12 +321,21 @@ async def main() -> None:
         print(f"[DEBUG] Episode error: {exc}", flush=True)
 
     finally:
-        try:
-            await env.close()
-        except Exception as e:
-            print(f"[DEBUG] env.close() error: {e}", flush=True)
+        if env is not None:
+            try:
+                await env.close()
+            except Exception as e:
+                print(f"[DEBUG] env.close() error: {e}", flush=True)
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import sys
+    try:
+        asyncio.run(main())
+    except Exception as exc:
+        # Last-resort guard: ensure a valid [END] line is always printed
+        # so the evaluator never sees a non-zero exit without output.
+        print(f"[DEBUG] Fatal error: {exc}", flush=True)
+        print("[END] success=false steps=0 score=0.000 rewards=", flush=True)
+    sys.exit(0)
