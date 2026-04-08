@@ -48,15 +48,7 @@ from bim_env import BimAction, BimEnv, BimObservation
 # ---------------------------------------------------------------------------
 
 IMAGE_NAME   = os.getenv("LOCAL_IMAGE_NAME", "bim-env:latest")
-# Accept all common key env vars used by LiteLLM / HuggingFace evaluation rigs.
-# Fall back to "not-required" so the OpenAI client never throws before reaching
-# the proxy (LiteLLM proxies ignore the key value when auth is handled upstream).
-API_KEY      = (
-    os.getenv("HF_TOKEN")
-    or os.getenv("API_KEY")
-    or os.getenv("OPENAI_API_KEY")
-    or "not-required"
-)
+API_KEY      = os.getenv("API_KEY") or os.getenv("HF_TOKEN")
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME   = os.getenv("MODEL_NAME", "meta-llama/Llama-4-Scout-17B-16E-Instruct")
 TASK_NAME    = os.getenv("TASK", "medium")
